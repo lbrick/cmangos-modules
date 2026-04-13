@@ -1618,7 +1618,7 @@ index 70642da17..5b3036697 100644
  
  // Get loot by object guid
 diff --git a/src/game/Mails/MailHandler.cpp b/src/game/Mails/MailHandler.cpp
-index e7506a6de..dfd7d7f23 100644
+index e7506a6de..4ed7c7433 100644
 --- a/src/game/Mails/MailHandler.cpp
 +++ b/src/game/Mails/MailHandler.cpp
 @@ -39,6 +39,10 @@
@@ -1638,7 +1638,7 @@ index e7506a6de..dfd7d7f23 100644
      CharacterDatabase.CommitTransaction();
 +
 +#ifdef ENABLE_MODULES
-+    sModuleMgr.OnSendMail(pl, rc, reqmoney);
++    sModuleMgr.OnSendMail(mail, pl, rc, reqmoney);
 +#endif
  }
  
