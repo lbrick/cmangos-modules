@@ -126,9 +126,20 @@ index 7918cecee..c6bfb91b6 100644
    message(STATUS "Build extractors      : Yes")
  else()
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
-index ddde74c2e..19dd8ad7a 100644
+index ddde74c2e..b858c5abe 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
+@@ -28,8 +28,8 @@ if(BUILD_PLAYERBOTS)
+   FetchContent_Declare(
+     PlayerBots
+     SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/PlayerBots"
+-    GIT_REPOSITORY "https://github.com/cmangos/playerbots.git"
+-    GIT_TAG "master"
++    GIT_REPOSITORY "https://github.com/lbrick/playerbots.git"
++    GIT_TAG "feature/lbricks-claude-mangosbots"
+   )
+ 
+   FetchContent_GetProperties(PlayerBots)
 @@ -57,4 +57,39 @@ endif()
  
  if(BUILD_LOGIN_SERVER)
