@@ -13,8 +13,8 @@ index 2cdf2fe13..b35ee60fe 100644
 +
 +  FetchContent_Declare(
 +    modules
-+    GIT_REPOSITORY "https://github.com/davidonete/cmangos-modules.git"
-+    GIT_TAG "main"
++    GIT_REPOSITORY "https://github.com/lbrick/cmangos-modules.git"
++    GIT_TAG "classic-patch-fix-attempt"
 +  )
 +
 +  if(NOT modules_POPULATED)
