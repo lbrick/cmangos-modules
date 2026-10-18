@@ -1512,7 +1512,7 @@ index 4cf05c5e6..0dcec017d 100644
  
  void WorldSession::HandleLootMethodOpcode(WorldPacket& recv_data)
 diff --git a/src/game/Loot/LootMgr.cpp b/src/game/Loot/LootMgr.cpp
-index 79b26641b..9cbdfe0bc 100644
+index 79b26641b..aa9ed4003 100644
 --- a/src/game/Loot/LootMgr.cpp
 +++ b/src/game/Loot/LootMgr.cpp
 @@ -33,6 +33,10 @@
@@ -1605,7 +1605,7 @@ index 79b26641b..9cbdfe0bc 100644
              if (lootItem->freeForAll)
              {
                  NotifyItemRemoved(target, lootItem->lootSlot);
-@@ -2226,6 +2259,10 @@ void Loot::GetLootItemsListFor(Player* player, LootItemList& lootList)
+@@ -2226,12 +2259,17 @@ void Loot::GetLootItemsListFor(Player* player, LootItemList& lootList)
  Loot::~Loot()
  {
      SendReleaseForAll();
@@ -1616,6 +1616,21 @@ index 79b26641b..9cbdfe0bc 100644
      for (auto& m_lootItem : m_lootItems)
          delete m_lootItem;
  }
+ 
+ void Loot::Clear()
+ {
++    m_roll.clear();
+     for (auto& m_lootItem : m_lootItems)
+         delete m_lootItem;
+     m_lootItems.clear();
+@@ -2240,7 +2278,6 @@ void Loot::Clear()
+     m_ownerSet.clear();
+     m_masterOwnerGuid.Clear();
+     m_currentLooterGuid.Clear();
+-    m_roll.clear();
+     m_maxEnchantSkill = 0;
+     m_haveItemOverThreshold = false;
+     m_isChecked = false;
 @@ -2288,6 +2325,11 @@ void Loot::SendGold(Player* player)
                  item->SetLootState(ITEM_LOOT_CHANGED);
          }
