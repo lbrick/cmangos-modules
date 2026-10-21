@@ -1320,7 +1320,7 @@ index 00986af9e..86d04043e 100644
  #include <math.h>
  #include <limits>
  #include <array>
-@@ -435,8 +445,95 @@ Unit::Unit() :
+@@ -435,8 +445,99 @@ Unit::Unit() :
      m_chainImmune = false;
  }
  
@@ -1408,8 +1408,12 @@ index 00986af9e..86d04043e 100644
 +    if (AttackerTripwireEnabled() && (m_attacking || !m_attackers.empty()))
 +    {
 +        std::string detail = "unit=" + AttackerTripwireUnit(this) + " attackers=" + std::to_string(m_attackers.size());
-+        if (m_attacking)
-+            detail += " victim=" + m_attacking->GetObjectGuid().GetString();
++        if (m_attacking) // the victim may already be freed: log its address, never read through it
++        {
++            std::ostringstream victim;
++            victim << " victim_ptr=" << static_cast<void const*>(m_attacking);
++            detail += victim.str();
++        }
 +        AttackerTripwireReport("deleted_in_attacker_set", detail);
 +    }
 +
