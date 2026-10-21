@@ -1300,10 +1300,10 @@ index 7b75c248a..e2fc47dd3 100644
      recv_data >> pageID;
  
 diff --git a/src/game/Entities/Unit.cpp b/src/game/Entities/Unit.cpp
-index 00986af9e..f506b7ab7 100644
+index 00986af9e..86d04043e 100644
 --- a/src/game/Entities/Unit.cpp
 +++ b/src/game/Entities/Unit.cpp
-@@ -56,6 +56,10 @@
+@@ -56,6 +56,16 @@
   #include "Metric/Metric.h"
  #endif
  
@@ -1311,10 +1311,116 @@ index 00986af9e..f506b7ab7 100644
 +#include "ModuleMgr.h"
 +#endif
 +
++#include "Config/Config.h"
++#include <atomic>
++#include <sstream>
++#ifndef _WIN32
++#include <execinfo.h>
++#endif
  #include <math.h>
  #include <limits>
  #include <array>
-@@ -1013,6 +1017,10 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
+@@ -435,8 +445,99 @@ Unit::Unit() :
+     m_chainImmune = false;
+ }
+ 
++// lbrick/cmangos-dev#68: a bot read a freed creature from its own attacker set. Debug.AttackerTripwire
++// (default off; env Mangosd_Debug_AttackerTripwire=1) logs each attacker-set write made from another
++// map's update thread or across maps, and each unit deleted while still in an attacker set, with a
++// backtrace, so the free path shows in the server log before the read that crashes.
++thread_local uint32 t_attackerTripwireMapId = UINT32_MAX;
++thread_local uint32 t_attackerTripwireInstanceId = 0;
++
++AttackerTripwireMapScope::AttackerTripwireMapScope(uint32 mapId, uint32 instanceId)
++{
++    t_attackerTripwireMapId = mapId;
++    t_attackerTripwireInstanceId = instanceId;
++}
++
++AttackerTripwireMapScope::~AttackerTripwireMapScope()
++{
++    t_attackerTripwireMapId = UINT32_MAX;
++    t_attackerTripwireInstanceId = 0;
++}
++
++static bool AttackerTripwireEnabled()
++{
++    static bool const enabled = sConfig.GetBoolDefault("Debug.AttackerTripwire", false);
++    return enabled;
++}
++
++static std::string AttackerTripwireUnit(Unit const* unit)
++{
++    std::ostringstream out;
++    out << unit->GetObjectGuid().GetString() << " entry=" << unit->GetEntry() << " map=" << unit->GetMapId()
++        << " instance=" << unit->GetInstanceId() << " inWorld=" << (unit->IsInWorld() ? 1 : 0);
++    return out.str();
++}
++
++static void AttackerTripwireReport(char const* event, std::string const& detail)
++{
++    // At most 200 lines a process, so a frequent path cannot flood the log.
++    static std::atomic<uint32> reports{0};
++    uint32 const n = ++reports;
++    if (n > 200)
++        return;
++
++    std::ostringstream out;
++    out << "[Attacker tripwire] event=" << event << " n=" << n << " thread_map=";
++    if (t_attackerTripwireMapId == UINT32_MAX)
++        out << "none";
++    else
++        out << t_attackerTripwireMapId << ":" << t_attackerTripwireInstanceId;
++    out << " " << detail;
++#ifndef _WIN32
++    void* frames[24];
++    int const count = backtrace(frames, 24);
++    char** symbols = backtrace_symbols(frames, count);
++    out << " stack=";
++    for (int i = 1; i < count; ++i)
++        out << (symbols ? symbols[i] : "?") << (i + 1 < count ? " | " : "");
++    free(symbols);
++#endif
++    sLog.outString("%s", out.str().c_str());
++}
++
++void Unit::AttackerTripwire(Unit const* attacker, char const* event) const
++{
++    if (!AttackerTripwireEnabled())
++        return;
++
++    bool const crossMap = attacker->GetMapId() != GetMapId() || attacker->GetInstanceId() != GetInstanceId();
++    // Map update threads own their map's units; the world thread (no map scope) is not checked.
++    bool const foreignThread = t_attackerTripwireMapId != UINT32_MAX &&
++        (GetMapId() != t_attackerTripwireMapId || GetInstanceId() != t_attackerTripwireInstanceId);
++    if (!crossMap && !foreignThread)
++        return;
++
++    AttackerTripwireReport(event, std::string(crossMap ? "cross_map=1" : "cross_map=0") +
++        (foreignThread ? " foreign_thread=1" : " foreign_thread=0") +
++        " victim=" + AttackerTripwireUnit(this) + " attacker=" + AttackerTripwireUnit(attacker));
++}
++
+ Unit::~Unit()
+ {
++    // A unit still attacking stays in its victim's attacker set after this delete; a unit with
++    // attackers leaves them holding it as their victim (lbrick/cmangos-dev#68).
++    if (AttackerTripwireEnabled() && (m_attacking || !m_attackers.empty()))
++    {
++        std::string detail = "unit=" + AttackerTripwireUnit(this) + " attackers=" + std::to_string(m_attackers.size());
++        if (m_attacking) // the victim may already be freed: log its address, never read through it
++        {
++            std::ostringstream victim;
++            victim << " victim_ptr=" << static_cast<void const*>(m_attacking);
++            detail += victim.str();
++        }
++        AttackerTripwireReport("deleted_in_attacker_set", detail);
++    }
++
+     // set current spells as deletable
+     for (auto& m_currentSpell : m_currentSpells)
+     {
+@@ -1013,6 +1110,10 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
  
      DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "DealDamageEnd returned %d damage", damage);
  
@@ -1325,7 +1431,7 @@ index 00986af9e..f506b7ab7 100644
      return damage;
  }
  
-@@ -1166,6 +1174,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+@@ -1166,6 +1267,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
          {
              DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "SET JUST_DIED");
              victim->SetDeathState(JUST_DIED);
@@ -1336,7 +1442,7 @@ index 00986af9e..f506b7ab7 100644
          }
  
          // playerVictim was in duel, duel must be interrupted
-@@ -1198,6 +1210,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+@@ -1198,6 +1303,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
      // stop combat
      DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "DealDamageAttackStop");
      victim->CombatStop();
@@ -1347,7 +1453,7 @@ index 00986af9e..f506b7ab7 100644
  }
  
  void Unit::HandleDamageDealt(Unit* dealer, Unit* victim, uint32& damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellInfo, bool duel_hasEnded)
-@@ -3230,6 +3246,11 @@ float Unit::CalculateEffectiveDodgeChance(const Unit* attacker, WeaponAttackType
+@@ -3230,6 +3339,11 @@ float Unit::CalculateEffectiveDodgeChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1359,7 +1465,7 @@ index 00986af9e..f506b7ab7 100644
      chance += GetDodgeChance();
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3254,6 +3275,11 @@ float Unit::CalculateEffectiveParryChance(const Unit* attacker, WeaponAttackType
+@@ -3254,6 +3368,11 @@ float Unit::CalculateEffectiveParryChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1371,7 +1477,7 @@ index 00986af9e..f506b7ab7 100644
      if (attType == RANGED_ATTACK)
          return 0.0f;
  
-@@ -3286,6 +3312,11 @@ float Unit::CalculateEffectiveBlockChance(const Unit* attacker, WeaponAttackType
+@@ -3286,6 +3405,11 @@ float Unit::CalculateEffectiveBlockChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1383,7 +1489,7 @@ index 00986af9e..f506b7ab7 100644
      chance += GetBlockChance();
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3733,6 +3764,12 @@ float Unit::GetMissChance(const SpellEntry* entry, SpellSchoolMask schoolMask) c
+@@ -3733,6 +3857,12 @@ float Unit::GetMissChance(const SpellEntry* entry, SpellSchoolMask schoolMask) c
  float Unit::CalculateEffectiveCritChance(const Unit* victim, WeaponAttackType attType, const SpellEntry* ability) const
  {
      float chance = 0.0f;
@@ -1396,7 +1502,7 @@ index 00986af9e..f506b7ab7 100644
      chance += (ability ? GetCritChance(ability, SPELL_SCHOOL_MASK_NORMAL) : GetCritChance(attType));
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3771,6 +3808,11 @@ float Unit::CalculateEffectiveMissChance(const Unit *victim, WeaponAttackType at
+@@ -3771,6 +3901,11 @@ float Unit::CalculateEffectiveMissChance(const Unit *victim, WeaponAttackType at
  {
      float chance = 0.0f;
  
@@ -1408,7 +1514,7 @@ index 00986af9e..f506b7ab7 100644
      chance += (ability ? victim->GetMissChance(ability, SPELL_SCHOOL_MASK_NORMAL) : victim->GetMissChance(attType));
      // Victim's own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit can't be missed
      if (chance < 0.005f)
-@@ -3858,6 +3900,12 @@ float Unit::CalculateSpellMissChance(const Unit* victim, SpellSchoolMask schoolM
+@@ -3858,6 +3993,12 @@ float Unit::CalculateSpellMissChance(const Unit* victim, SpellSchoolMask schoolM
          return 0.0f;
  
      float chance = 0.0f;
@@ -1421,7 +1527,7 @@ index 00986af9e..f506b7ab7 100644
      const float minimum = 1.0f; // Pre-WotLK: unavoidable spellInfo miss is at least 1%
  
      if (spell->HasAttribute(SPELL_ATTR_EX3_NORMAL_RANGED_ATTACK) || spell->DmgClass == SPELL_DAMAGE_CLASS_MELEE || spell->DmgClass == SPELL_DAMAGE_CLASS_RANGED)
-@@ -6902,6 +6950,10 @@ int32 Unit::DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellInf
+@@ -6902,6 +7043,10 @@ int32 Unit::DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellInf
      if (pVictim->AI())
          pVictim->AI()->HealedBy(this, addhealth);
  
@@ -1432,7 +1538,7 @@ index 00986af9e..f506b7ab7 100644
      return gain;
  }
  
-@@ -11771,6 +11823,11 @@ float Unit::GetAttackDistance(Unit const* target) const
+@@ -11771,6 +11916,11 @@ float Unit::GetAttackDistance(Unit const* target) const
      if (aggroRate == 0)
          return 0.0f;
  
@@ -1444,6 +1550,45 @@ index 00986af9e..f506b7ab7 100644
      uint32 playerlevel = target->GetLevelForTarget(this);
      uint32 creaturelevel = GetLevelForTarget(target);
  
+diff --git a/src/game/Entities/Unit.h b/src/game/Entities/Unit.h
+index c5a03c1c3..de2dac903 100644
+--- a/src/game/Entities/Unit.h
++++ b/src/game/Entities/Unit.h
+@@ -1069,6 +1069,13 @@ struct SelectAttackingTargetParams
+ 
+ struct SpellProcEventEntry;                                 // used only privately
+ 
++// Marks the current thread as updating one map for Debug.AttackerTripwire (lbrick/cmangos-dev#68).
++struct AttackerTripwireMapScope
++{
++    AttackerTripwireMapScope(uint32 mapId, uint32 instanceId);
++    ~AttackerTripwireMapScope();
++};
++
+ class Unit : public WorldObject
+ {
+     public:
+@@ -1224,6 +1231,7 @@ class Unit : public WorldObject
+ 
+         bool _addAttacker(Unit* pAttacker)                  //< (Internal Use) must be called only from Unit::Attack(Unit*)
+         {
++            AttackerTripwire(pAttacker, "attacker_add");
+             AttackerSet::const_iterator itr = m_attackers.find(pAttacker);
+             if (itr == m_attackers.end())
+             {
+@@ -1234,8 +1242,12 @@ class Unit : public WorldObject
+         }
+         void _removeAttacker(Unit* pAttacker)               //< (Internal Use) must be called only from Unit::AttackStop()
+         {
++            AttackerTripwire(pAttacker, "attacker_remove");
+             m_attackers.erase(pAttacker);
+         }
++        // Debug.AttackerTripwire: logs attacker-set writes made from another map's thread or
++        // across maps (lbrick/cmangos-dev#68).
++        void AttackerTripwire(Unit const* attacker, char const* event) const;
+         Unit* getAttackerForHelper()                        //< Return a possible enemy from this unit to help in combat
+         {
+             if (GetVictim() != nullptr)
 diff --git a/src/game/Groups/Group.cpp b/src/game/Groups/Group.cpp
 index 036bfccae..f794c3691 100644
 --- a/src/game/Groups/Group.cpp
@@ -1680,6 +1825,18 @@ index 7dc32473b..2142cc022 100644
  }
  
  /**
+diff --git a/src/game/Maps/Map.cpp b/src/game/Maps/Map.cpp
+index 13896f973..e1200a077 100644
+--- a/src/game/Maps/Map.cpp
++++ b/src/game/Maps/Map.cpp
+@@ -691,6 +691,7 @@ void Map::VisitNearbyCellsOf(WorldObject* obj, TypeContainerVisitor<MaNGOS::Obje
+ 
+ void Map::Update(const uint32& t_diff)
+ {
++    AttackerTripwireMapScope attackerTripwireScope(i_id, i_InstanceId);
+ 
+ #ifdef BUILD_METRICS
+     metric::duration<std::chrono::milliseconds> meas("map.update", {
 diff --git a/src/game/Quests/QuestHandler.cpp b/src/game/Quests/QuestHandler.cpp
 index 89a150143..065c00af2 100644
 --- a/src/game/Quests/QuestHandler.cpp
