@@ -1825,6 +1825,38 @@ index 7dc32473b..2142cc022 100644
  }
  
  /**
+diff --git a/src/game/Maps/GridMap.cpp b/src/game/Maps/GridMap.cpp
+index 6bc21dbd0..f6af4bc43 100644
+--- a/src/game/Maps/GridMap.cpp
++++ b/src/game/Maps/GridMap.cpp
+@@ -766,6 +766,9 @@ void TerrainInfo::CleanUpGrids(const uint32 diff)
+     if (!i_timer.Passed())
+         return;
+ 
++    // Map update threads load VMAP and MMAP tiles in LoadMapAndVMap under the same lock; unloading
++    // without it frees tile state a load is inserting (lbrick/cmangos-dev#82).
++    LOCK_GUARD lock(m_mutex);
+     for (int y = 0; y < MAX_NUMBER_OF_GRIDS; ++y)
+     {
+         for (int x = 0; x < MAX_NUMBER_OF_GRIDS; ++x)
+@@ -1240,6 +1243,9 @@ GridMap* TerrainInfo::GetGrid(const float x, const float y, bool loadOnlyMap /*=
+ 
+ GridMap* TerrainInfo::LoadMapAndVMap(const uint32 x, const uint32 y, bool mapOnly /*= false*/)
+ {
++    // Held for the whole load: the VMAP and MMAP tile loads below must not overlap CleanUpGrids
++    // unloading tiles of the same map on the world thread (lbrick/cmangos-dev#82).
++    LOCK_GUARD lock(m_mutex);
+     if ((m_GridMaps[x][y] && mapOnly)
+         || (VMAP::VMapFactory::createOrGetVMapManager()->IsTileLoaded(m_mapId, x, y) && MMAP::MMapFactory::createOrGetMMapManager()->IsMMapIsLoaded(m_mapId, x, y)))
+     {
+@@ -1248,7 +1254,6 @@ GridMap* TerrainInfo::LoadMapAndVMap(const uint32 x, const uint32 y, bool mapOnl
+     }
+ 
+     {
+-        LOCK_GUARD lock(m_mutex);
+         // double checked lock pattern
+         if (!m_GridMaps[x][y])
+         {
 diff --git a/src/game/Maps/Map.cpp b/src/game/Maps/Map.cpp
 index 13896f973..e1200a077 100644
 --- a/src/game/Maps/Map.cpp
