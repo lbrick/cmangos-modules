@@ -1299,8 +1299,98 @@ index 7b75c248a..e2fc47dd3 100644
      uint32 pageID;
      recv_data >> pageID;
  
+diff --git a/src/game/Entities/Transports.cpp b/src/game/Entities/Transports.cpp
+index 9df06377f..ece198983 100644
+--- a/src/game/Entities/Transports.cpp
++++ b/src/game/Entities/Transports.cpp
+@@ -32,6 +32,10 @@
+ 
+ #include <G3D/Quat.h>
+ 
++#include "Config/Config.h"
++#include <atomic>
++#include <sstream>
++
+ void MapManager::LoadTransports()
+ {
+     sTransportMgr.LoadTransportTemplates();
+@@ -268,8 +272,53 @@ void Transport::TeleportTransport(uint32 newMapid, float x, float y, float z, fl
+         UpdateModelPosition();
+ }
+ 
++// lbrick/cmangos-dev#104: two crashes read a freed node from a transport's passenger set.
++// Debug.TransportTripwire (default off; env Mangosd_Debug_TransportTripwire=1) logs each
++// passenger-set change made on another map's update thread, or while this thread walks the same
++// set, with a backtrace, so the writer shows in the server log before the walk that crashes.
++static thread_local GenericTransport const* t_transportTripwireWalking = nullptr;
++
++static void TransportTripwire(GenericTransport* transport, Unit const* passenger, char const* event)
++{
++    static bool const enabled = sConfig.GetBoolDefault("Debug.TransportTripwire", false);
++    if (!enabled)
++        return;
++
++    // Map update threads own their map's transports; the world thread runs between map updates.
++    uint32 threadMap = 0, threadInstance = 0;
++    bool const onMapThread = TripwireThreadMap(threadMap, threadInstance);
++    bool const foreignThread = onMapThread &&
++        (transport->GetMapId() != threadMap || transport->GetInstanceId() != threadInstance);
++    bool const duringWalk = t_transportTripwireWalking == transport;
++    if (!foreignThread && !duringWalk)
++        return;
++
++    // At most 200 lines a process, so a frequent path cannot flood the log.
++    static std::atomic<uint32> reports{0};
++    uint32 const n = ++reports;
++    if (n > 200)
++        return;
++
++    std::ostringstream out;
++    out << "[Transport tripwire] event=" << event << " n=" << n << " thread_map=";
++    if (onMapThread)
++        out << threadMap << ":" << threadInstance;
++    else
++        out << "none";
++    out << " foreign_thread=" << (foreignThread ? 1 : 0) << " during_walk=" << (duringWalk ? 1 : 0)
++        << " transport=" << transport->GetObjectGuid().GetString() << " entry=" << transport->GetEntry()
++        << " map=" << transport->GetMapId() << ":" << transport->GetInstanceId()
++        << " passengers=" << transport->GetPassengers().size()
++        << " passenger=" << passenger->GetObjectGuid().GetString() << " passenger_map=" << passenger->GetMapId()
++        << " passenger_inWorld=" << (passenger->IsInWorld() ? 1 : 0)
++        << TripwireBacktrace();
++    sLog.outString("%s", out.str().c_str());
++}
++
+ bool GenericTransport::AddPassenger(Unit* passenger, bool adjustCoords)
+ {
++    TransportTripwire(this, passenger, "passenger_add");
++
+     if (m_passengers.find(passenger) == m_passengers.end())
+     {
+         DETAIL_LOG("Unit %s boarded transport %s.", passenger->GetName(), GetName());
+@@ -299,6 +348,8 @@ bool GenericTransport::AddPassenger(Unit* passenger, bool adjustCoords)
+ 
+ bool GenericTransport::RemovePassenger(Unit* passenger)
+ {
++    TransportTripwire(this, passenger, "passenger_remove");
++
+     bool erased = false;
+     if (m_passengerTeleportIterator != m_passengers.end())
+     {
+@@ -497,8 +548,11 @@ void GenericTransport::UpdatePosition(float x, float y, float z, float o)
+ 
+ void GenericTransport::UpdatePassengerPositions(PassengerSet& passengers)
+ {
++    GenericTransport const* const outerWalk = t_transportTripwireWalking;
++    t_transportTripwireWalking = this;
+     for (const auto passenger : passengers)
+         UpdatePassengerPosition(passenger);
++    t_transportTripwireWalking = outerWalk;
+ }
+ 
+ void GenericTransport::UpdatePassengerPosition(WorldObject* passenger)
 diff --git a/src/game/Entities/Unit.cpp b/src/game/Entities/Unit.cpp
-index 00986af9e..86d04043e 100644
+index 00986af9e..f2b7bd582 100644
 --- a/src/game/Entities/Unit.cpp
 +++ b/src/game/Entities/Unit.cpp
 @@ -56,6 +56,16 @@
@@ -1320,7 +1410,7 @@ index 00986af9e..86d04043e 100644
  #include <math.h>
  #include <limits>
  #include <array>
-@@ -435,8 +445,99 @@ Unit::Unit() :
+@@ -435,8 +445,124 @@ Unit::Unit() :
      m_chainImmune = false;
  }
  
@@ -1341,6 +1431,31 @@ index 00986af9e..86d04043e 100644
 +{
 +    t_attackerTripwireMapId = UINT32_MAX;
 +    t_attackerTripwireInstanceId = 0;
++}
++
++bool TripwireThreadMap(uint32& mapId, uint32& instanceId)
++{
++    if (t_attackerTripwireMapId == UINT32_MAX)
++        return false;
++
++    mapId = t_attackerTripwireMapId;
++    instanceId = t_attackerTripwireInstanceId;
++    return true;
++}
++
++std::string TripwireBacktrace()
++{
++    std::ostringstream out;
++#ifndef _WIN32
++    void* frames[24];
++    int const count = backtrace(frames, 24);
++    char** symbols = backtrace_symbols(frames, count);
++    out << " stack=";
++    for (int i = 1; i < count; ++i)
++        out << (symbols ? symbols[i] : "?") << (i + 1 < count ? " | " : "");
++    free(symbols);
++#endif
++    return out.str();
 +}
 +
 +static bool AttackerTripwireEnabled()
@@ -1420,7 +1535,7 @@ index 00986af9e..86d04043e 100644
      // set current spells as deletable
      for (auto& m_currentSpell : m_currentSpells)
      {
-@@ -1013,6 +1110,10 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
+@@ -1013,6 +1139,10 @@ uint32 Unit::DealDamage(Unit* dealer, Unit* victim, uint32 damage, CleanDamage c
  
      DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "DealDamageEnd returned %d damage", damage);
  
@@ -1431,7 +1546,7 @@ index 00986af9e..86d04043e 100644
      return damage;
  }
  
-@@ -1166,6 +1267,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+@@ -1166,6 +1296,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
          {
              DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "SET JUST_DIED");
              victim->SetDeathState(JUST_DIED);
@@ -1442,7 +1557,7 @@ index 00986af9e..86d04043e 100644
          }
  
          // playerVictim was in duel, duel must be interrupted
-@@ -1198,6 +1303,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
+@@ -1198,6 +1332,10 @@ void Unit::Kill(Unit* killer, Unit* victim, DamageEffectType damagetype, SpellEn
      // stop combat
      DEBUG_FILTER_LOG(LOG_FILTER_DAMAGE, "DealDamageAttackStop");
      victim->CombatStop();
@@ -1453,7 +1568,7 @@ index 00986af9e..86d04043e 100644
  }
  
  void Unit::HandleDamageDealt(Unit* dealer, Unit* victim, uint32& damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellEntry const* spellInfo, bool duel_hasEnded)
-@@ -3230,6 +3339,11 @@ float Unit::CalculateEffectiveDodgeChance(const Unit* attacker, WeaponAttackType
+@@ -3230,6 +3368,11 @@ float Unit::CalculateEffectiveDodgeChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1465,7 +1580,7 @@ index 00986af9e..86d04043e 100644
      chance += GetDodgeChance();
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3254,6 +3368,11 @@ float Unit::CalculateEffectiveParryChance(const Unit* attacker, WeaponAttackType
+@@ -3254,6 +3397,11 @@ float Unit::CalculateEffectiveParryChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1477,7 +1592,7 @@ index 00986af9e..86d04043e 100644
      if (attType == RANGED_ATTACK)
          return 0.0f;
  
-@@ -3286,6 +3405,11 @@ float Unit::CalculateEffectiveBlockChance(const Unit* attacker, WeaponAttackType
+@@ -3286,6 +3434,11 @@ float Unit::CalculateEffectiveBlockChance(const Unit* attacker, WeaponAttackType
  {
      float chance = 0.0f;
  
@@ -1489,7 +1604,7 @@ index 00986af9e..86d04043e 100644
      chance += GetBlockChance();
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3733,6 +3857,12 @@ float Unit::GetMissChance(const SpellEntry* entry, SpellSchoolMask schoolMask) c
+@@ -3733,6 +3886,12 @@ float Unit::GetMissChance(const SpellEntry* entry, SpellSchoolMask schoolMask) c
  float Unit::CalculateEffectiveCritChance(const Unit* victim, WeaponAttackType attType, const SpellEntry* ability) const
  {
      float chance = 0.0f;
@@ -1502,7 +1617,7 @@ index 00986af9e..86d04043e 100644
      chance += (ability ? GetCritChance(ability, SPELL_SCHOOL_MASK_NORMAL) : GetCritChance(attType));
      // Own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit is incapable
      if (chance < 0.005f)
-@@ -3771,6 +3901,11 @@ float Unit::CalculateEffectiveMissChance(const Unit *victim, WeaponAttackType at
+@@ -3771,6 +3930,11 @@ float Unit::CalculateEffectiveMissChance(const Unit *victim, WeaponAttackType at
  {
      float chance = 0.0f;
  
@@ -1514,7 +1629,7 @@ index 00986af9e..86d04043e 100644
      chance += (ability ? victim->GetMissChance(ability, SPELL_SCHOOL_MASK_NORMAL) : victim->GetMissChance(attType));
      // Victim's own chance appears to be zero / below zero / unmeaningful for some reason (debuffs?): skip calculation, unit can't be missed
      if (chance < 0.005f)
-@@ -3858,6 +3993,12 @@ float Unit::CalculateSpellMissChance(const Unit* victim, SpellSchoolMask schoolM
+@@ -3858,6 +4022,12 @@ float Unit::CalculateSpellMissChance(const Unit* victim, SpellSchoolMask schoolM
          return 0.0f;
  
      float chance = 0.0f;
@@ -1527,7 +1642,7 @@ index 00986af9e..86d04043e 100644
      const float minimum = 1.0f; // Pre-WotLK: unavoidable spellInfo miss is at least 1%
  
      if (spell->HasAttribute(SPELL_ATTR_EX3_NORMAL_RANGED_ATTACK) || spell->DmgClass == SPELL_DAMAGE_CLASS_MELEE || spell->DmgClass == SPELL_DAMAGE_CLASS_RANGED)
-@@ -6902,6 +7043,10 @@ int32 Unit::DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellInf
+@@ -6902,6 +7072,10 @@ int32 Unit::DealHeal(Unit* pVictim, uint32 addhealth, SpellEntry const* spellInf
      if (pVictim->AI())
          pVictim->AI()->HealedBy(this, addhealth);
  
@@ -1538,7 +1653,7 @@ index 00986af9e..86d04043e 100644
      return gain;
  }
  
-@@ -11771,6 +11916,11 @@ float Unit::GetAttackDistance(Unit const* target) const
+@@ -11771,6 +11945,11 @@ float Unit::GetAttackDistance(Unit const* target) const
      if (aggroRate == 0)
          return 0.0f;
  
@@ -1551,10 +1666,10 @@ index 00986af9e..86d04043e 100644
      uint32 creaturelevel = GetLevelForTarget(target);
  
 diff --git a/src/game/Entities/Unit.h b/src/game/Entities/Unit.h
-index c5a03c1c3..de2dac903 100644
+index c5a03c1c3..091727dbf 100644
 --- a/src/game/Entities/Unit.h
 +++ b/src/game/Entities/Unit.h
-@@ -1069,6 +1069,13 @@ struct SelectAttackingTargetParams
+@@ -1069,6 +1069,19 @@ struct SelectAttackingTargetParams
  
  struct SpellProcEventEntry;                                 // used only privately
  
@@ -1565,10 +1680,16 @@ index c5a03c1c3..de2dac903 100644
 +    ~AttackerTripwireMapScope();
 +};
 +
++// The map the current thread is updating, for Debug.TransportTripwire (lbrick/cmangos-dev#104).
++// False off a map update thread.
++bool TripwireThreadMap(uint32& mapId, uint32& instanceId);
++// " stack=<frames>" for a tripwire line, or an empty string where backtraces are unavailable.
++std::string TripwireBacktrace();
++
  class Unit : public WorldObject
  {
      public:
-@@ -1224,6 +1231,7 @@ class Unit : public WorldObject
+@@ -1224,6 +1237,7 @@ class Unit : public WorldObject
  
          bool _addAttacker(Unit* pAttacker)                  //< (Internal Use) must be called only from Unit::Attack(Unit*)
          {
@@ -1576,7 +1697,7 @@ index c5a03c1c3..de2dac903 100644
              AttackerSet::const_iterator itr = m_attackers.find(pAttacker);
              if (itr == m_attackers.end())
              {
-@@ -1234,8 +1242,12 @@ class Unit : public WorldObject
+@@ -1234,8 +1248,12 @@ class Unit : public WorldObject
          }
          void _removeAttacker(Unit* pAttacker)               //< (Internal Use) must be called only from Unit::AttackStop()
          {
