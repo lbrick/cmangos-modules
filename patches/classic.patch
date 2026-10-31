@@ -2279,3 +2279,48 @@ index e344c52c1..d0495b180 100644
  }
  
  namespace MaNGOS
+diff --git a/src/shared/Util/Errors.h b/src/shared/Util/Errors.h
+index 2d3a381f7..679cc5fba 100644
+--- a/src/shared/Util/Errors.h
++++ b/src/shared/Util/Errors.h
+@@ -21,6 +21,32 @@
+ 
+ #include "Common.h"
+ 
++#if defined(__has_include)
++#  if __has_include(<execinfo.h>)
++#    include <execinfo.h>
++#    define MANGOS_HAS_EXECINFO 1
++#  endif
++#endif
++
++#ifdef MANGOS_HAS_EXECINFO
++// The first backtrace() call loads libgcc_s, which allocates; take it at startup so a failed
++// assert, which may run with a corrupt heap, does not (lbrick/cmangos-dev#107).
++inline int const g_wpErrorBacktracePrimed = []() { void* frame[1]; return backtrace(frame, 1); }();
++#endif
++
++// Writes the asserting thread's stack to stderr, without allocating (lbrick/cmangos-dev#107).
++// A PIE mangosd prints frames as mangosd(+0x<offset>); `addr2line -Cfipe mangosd <offset>`
++// against the same binary names them.
++inline void WPErrorBacktrace()
++{
++#ifdef MANGOS_HAS_EXECINFO
++    void* frames[32];
++    int const count = backtrace(frames, 32);
++    fputs("Assert stack:\n", stderr);
++    backtrace_symbols_fd(frames, count, fileno(stderr));
++#endif
++}
++
+ // Normal assert.
+ #define WPError(CONDITION) \
+ if (!(CONDITION)) \
+@@ -29,6 +55,7 @@ if (!(CONDITION)) \
+     fprintf(stderr, "Critical Error: A condition which must never be false was found to be false. \
+ Server was shut down to protect data integrity.\nIf this error is occurring frequently, please \
+ recompile the software in debug mode to get more details.\n\n%s(): %s\n", __FUNCTION__, STRINGIZE(CONDITION)); \
++    WPErrorBacktrace(); \
+     std::abort(); \
+ }
+ 
