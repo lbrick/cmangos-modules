@@ -1300,7 +1300,7 @@ index 7b75c248a..e2fc47dd3 100644
      recv_data >> pageID;
  
 diff --git a/src/game/Entities/Transports.cpp b/src/game/Entities/Transports.cpp
-index 9df06377f..ece198983 100644
+index 9df06377f..498d9f99b 100644
 --- a/src/game/Entities/Transports.cpp
 +++ b/src/game/Entities/Transports.cpp
 @@ -32,6 +32,10 @@
@@ -1377,14 +1377,21 @@ index 9df06377f..ece198983 100644
      bool erased = false;
      if (m_passengerTeleportIterator != m_passengers.end())
      {
-@@ -497,8 +548,11 @@ void GenericTransport::UpdatePosition(float x, float y, float z, float o)
+@@ -497,8 +548,16 @@ void GenericTransport::UpdatePosition(float x, float y, float z, float o)
  
  void GenericTransport::UpdatePassengerPositions(PassengerSet& passengers)
  {
+-    for (const auto passenger : passengers)
+-        UpdatePassengerPosition(passenger);
 +    GenericTransport const* const outerWalk = t_transportTripwireWalking;
 +    t_transportTripwireWalking = this;
-     for (const auto passenger : passengers)
-         UpdatePassengerPosition(passenger);
++    // Relocating a passenger can remove passengers from the set, the relocated one included:
++    // a pet carried out of its owner's sight is unsummoned. Walk a copy, and skip any entry
++    // that has left the set; it is only compared, never dereferenced.
++    std::vector<WorldObject*> const walk(passengers.begin(), passengers.end());
++    for (WorldObject* passenger : walk)
++        if (passengers.find(passenger) != passengers.end())
++            UpdatePassengerPosition(passenger);
 +    t_transportTripwireWalking = outerWalk;
  }
  
